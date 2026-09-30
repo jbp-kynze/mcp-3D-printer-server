@@ -207,3 +207,20 @@ test('fresh reads publish pushall and get_version with string sequence ids witho
   assert.equal(published.find(payload => payload.info).info.command,'get_version');
   for (const payload of published) assert.match(Object.values(payload)[0].sequence_id, /^\d+$/);
 });
+
+test('the serial in upgrade_state identifies a printer that never answers get_version, and must match',async () => {
+  const printer = rawPrinter((payload, emit) => {
+    if(payload.pushing) emit({print:{command:'push_status',gcode_state:'IDLE',print_error:0,hms:[],nozzle_diameter:'0.4',upgrade_state:{sn:'00MTEST'}}},'device/00MTEST/report');
+  });
+  const status = await safety.readFreshPrinterStatus(printer,'00MTEST',50);
+  assert.equal(status.model,'x1c'); assert.equal(status.observedSerial,'00MTEST');
+  assert.equal(status.observation.identitySource,'report-serial');
+  const other = rawPrinter((payload, emit) => {
+    if(payload.pushing) emit({print:{command:'push_status',gcode_state:'IDLE',print_error:0,hms:[],upgrade_state:{sn:'00MOTHER'}}},'device/00MTEST/report');
+  });
+  await assert.rejects(safety.readFreshPrinterStatus(other,'00MTEST',50),/serial/i);
+  const silent = rawPrinter((payload, emit) => {
+    if(payload.pushing) emit({print:{command:'push_status',gcode_state:'IDLE',print_error:0,hms:[]}},'device/00MTEST/report');
+  });
+  await assert.rejects(safety.readFreshPrinterStatus(silent,'00MTEST',20),/fresh|timed out/i);
+});

@@ -28,6 +28,16 @@
   resolved by the variant tables still stop the print. Evidence: new unit
   tests, and the read-only inspection of one real X1C slice (hardened steel
   0.4, PLA, 220/55 C, inspection only; no print was started with this build).
+- Identify Bambu printers that never answer `get_version` (X1 Carbons on firmware
+  01.07) for the print safety check. The fresh-report read needed a printer
+  identity from the report or the `get_version` reply and timed out after 5 s
+  otherwise ("Timed out waiting for a fresh MQTT safety report"), so no print
+  could start. The serial in `upgrade_state.sn` of the printer's own status
+  report now counts as identity evidence: it must equal the configured serial,
+  and the model still comes from the serial prefix (as for the `get_version`
+  ota serial). Without any identity evidence the read still times out. Evidence:
+  unit tests, and read-only fresh status reads against two real X1 Carbons
+  (model x1c, source report-serial); no print was started with this build.
 
 ## 1.2.10
 

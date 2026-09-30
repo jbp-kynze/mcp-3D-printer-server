@@ -32,7 +32,9 @@ function observedIdentity(raw: Record<string, any>, configuredSerial: string) {
     .filter(value => typeof value === "string" && value.trim());
   const models = declarations.map(value => normalizeModel(MODEL_IDS[value.trim().toUpperCase()] ?? value));
   if (models.some(model => !model)) throw new Error("Printer reported an unknown model identity; cannot verify this printer.");
-  const serials = [raw.serial, raw.serial_number, raw.sn, raw.device?.sn,
+  // upgrade_state.sn is the printer's own serial in every push_status, so firmware that never answers
+  // get_version (seen on X1C 01.07) can still be identified; it must equal the configured serial.
+  const serials = [raw.serial, raw.serial_number, raw.sn, raw.device?.sn, raw.upgrade_state?.sn,
     ...(Array.isArray(raw.modules) ? raw.modules.filter((module: any) => module?.name === "ota").map((module: any) => module.sn) : [])]
     .filter(value => typeof value === "string" && value.trim()).map(value => value.trim());
   if (serials.some(serial => serial.toUpperCase() !== configuredSerial.trim().toUpperCase())) {
@@ -44,7 +46,7 @@ function observedIdentity(raw: Record<string, any>, configuredSerial: string) {
   }
   if (new Set(models).size > 1) throw new Error("Printer returned contradictory model identity information.");
   const model = models[0];
-  return { model, observedSerial: serials[0], identitySource: declarations.length ? "report" : "module-serial" };
+  return { model, observedSerial: serials[0], identitySource: declarations.length ? "report" : Array.isArray(raw.modules) && raw.modules.length ? "module-serial" : "report-serial" };
 }
 
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
