@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Keep the server alive and answer `get_printer_status` for Bambu printers that
+  broadcast reports but do not answer bambu-node's initial request (seen on two
+  X1 Carbons on firmware 01.07 in LAN Only Mode, which still accept control
+  commands such as the chamber light; the cause is unknown, and Developer Mode
+  does not exist on that firmware). The unanswered request used to become an unhandled rejection that
+  terminated the server, and bambu-node's `connect()` never resolved, which
+  also hung every concurrent caller. The client now proceeds 8 s after the MQTT
+  session is up, concurrent callers share that bounded wait, a failed or late
+  connection is evicted, and `get_printer_status` returns the latest broadcast
+  report with `commandsAnswered: false` and a LAN Only Mode / Developer Mode hint when its own
+  status request also goes unanswered. Evidence: a stub MQTT client for the
+  crash and its guard, and read-only status calls (three concurrent) against two
+  real X1 Carbons on 2026-09-30; no print, heating or motion command was sent.
+  The guard ignores any unawaited bambu-node command timeout, not only the
+  initial one.
+- Accept OrcaSlicer 2.4 CLI output for an X1 Carbon in the print safety check.
+  The G-code header lists one `printer_extruder_id` while the project lists one
+  per extruder variant row, and the check rejected the file with "unknown or
+  malformed printer extruder id metadata", so `slice_stl` output could not be
+  printed. A lone header id is now repeated across the project rows and must
+  still equal every one of them; differing ids or nozzle types that are not
+  resolved by the variant tables still stop the print. Evidence: new unit
+  tests, and the read-only inspection of one real X1C slice (hardened steel
+  0.4, PLA, 220/55 C, inspection only; no print was started with this build).
+
 ## 1.2.10
 
 ### Safety
