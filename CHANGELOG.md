@@ -19,6 +19,15 @@
   real X1 Carbons on 2026-09-30; no print, heating or motion command was sent.
   The guard ignores any unawaited bambu-node command timeout, not only the
   initial one.
+- Accept OrcaSlicer 2.4 CLI output for an X1 Carbon in the print safety check.
+  The G-code header lists one `printer_extruder_id` while the project lists one
+  per extruder variant row, and the check rejected the file with "unknown or
+  malformed printer extruder id metadata", so `slice_stl` output could not be
+  printed. A lone header id is now repeated across the project rows and must
+  still equal every one of them; differing ids or nozzle types that are not
+  resolved by the variant tables still stop the print. Evidence: new unit
+  tests, and the read-only inspection of one real X1C slice (hardened steel
+  0.4, PLA, 220/55 C, inspection only; no print was started with this build).
 
 ## 1.2.10
 

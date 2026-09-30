@@ -189,7 +189,10 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
       // diameters and selected flow types are per physical extruder. Never truncate
       // that variant table or mistake its rows for filament/nozzle positions.
       const ids=consistent(metadataValues(metadata,['printer_extruder_id']),value=>{
-        const ids=list(value);return ids.length===entries.length && ids.every(id=>/^[1-9]\d*$/.test(id) && Number(id)<=nozzleDiameters.length)?ids.map(Number):undefined;
+        // OrcaSlicer 2.4 writes one id in the G-code header while the project lists one per
+        // variant row. Repeat a lone id across the rows; it must still equal every project row.
+        const raw=list(value);const ids=raw.length===1?Array<string>(entries.length).fill(raw[0]):raw;
+        return ids.length===entries.length && ids.every(id=>/^[1-9]\d*$/.test(id) && Number(id)<=nozzleDiameters.length)?ids.map(Number):undefined;
       },'printer extruder id');
       const resolved:string[]=[];
       for(let index=0;index<nozzleDiameters.length;index++) {

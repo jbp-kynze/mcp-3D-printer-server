@@ -348,3 +348,18 @@ test('ambiguous heater candidates still enforce every possible material temperat
   const selected=await inspect(t,'',{model:'h2d'},{...entries,'Metadata/plate_1.gcode':'T1\nM104 S300\n'});
   assert.deepEqual(selected.usedFilamentPositions,[1]);
 });
+
+// OrcaSlicer 2.4 CLI output for an X1 Carbon: two variant rows in the project, one id in the G-code header.
+test('a single header printer_extruder_id matches identical project rows and never hides a contradiction',async t=>{
+  const project=()=>({printer_model:'Bambu Lab X1 Carbon',nozzle_diameter:['0.4'],filament_type:['PLA'],nozzle_type:['hardened_steel','hardened_steel'],
+    printer_extruder_id:['1','1'],printer_extruder_variant:['Direct Drive Standard','Direct Drive High Flow']});
+  const gcode=(type='hardened_steel',id='1')=>`; nozzle_type = ${type}
+; printer_extruder_id = ${id}
+M104 S220
+`;
+  const run=(proj,code)=>inspect(t,'',{model:'x1c'},{'Metadata/project_settings.config':proj,'Metadata/plate_1.gcode':header('X1 Carbon')+code});
+  const ok=await run(project(),gcode());assert.deepEqual(ok.nozzleTypes,['hardened_steel']);
+  await assert.rejects(run({...project(),printer_extruder_id:['1','2']},gcode()),/extruder|contradict|malformed/i);
+  await assert.rejects(run({...project(),nozzle_type:['stainless_steel','hardened_steel']},gcode()),/nozzle|extruder|variant|contradict|metadata/i);
+  await assert.rejects(run(project(),gcode('hardened_steel','3')),/extruder|contradict|malformed/i);
+});
