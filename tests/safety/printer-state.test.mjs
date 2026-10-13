@@ -76,6 +76,15 @@ test('rejects busy, failed, missing or unknown states while allowing IDLE and FI
   for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','FAILED','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
   assert.doesNotThrow(() => check(fresh({gcode_state:'FINISH'})));
 });
+test('accepts a stale FAILED state only when the error checks pass and the nozzle is cold', () => {
+  assert.doesNotThrow(() => check(fresh({gcode_state:'FAILED', nozzle_temper:35})));
+  assert.doesNotThrow(() => check(fresh({gcode_state:'FAILED', nozzle_temper:60})));
+  assert.throws(() => check(fresh({gcode_state:'FAILED', nozzle_temper:61})), /state|idle/i);
+  assert.throws(() => check(fresh({gcode_state:'FAILED'})), /state|idle/i);
+  assert.throws(() => check(fresh({gcode_state:'FAILED', nozzle_temper:'cold'})), /state|idle/i);
+  assert.throws(() => check(fresh({gcode_state:'FAILED', nozzle_temper:30, print_error:1})), /state|idle|error/i);
+  assert.throws(() => check(fresh({gcode_state:'FAILED', nozzle_temper:30, hms:[{attr:0x0C000300, code:0x00020002}]})), /HMS|error|state/i);
+});
 test('requires explicit clean print error and valid HMS severity, but permits informative HMS', () => {
   for(const print_error of [undefined,1,'03008004','not-a-number']) assert.throws(() => check(fresh({print_error})), /error/i);
   for(const hms of [undefined,'bad',[{attr:0,code:0x10001}],[{attr:0,code:0x20001}],[{attr:0,code:0x30001}],[{attr:0,code:0x50001}],[{attr:0}],[{severity:'info',code:0x10001}]]) assert.throws(() => check(fresh({hms})), /HMS/i);

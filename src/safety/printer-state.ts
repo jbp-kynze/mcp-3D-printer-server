@@ -195,7 +195,10 @@ function reportedNozzles(raw: Record<string,any>): ReportedNozzle[] {
 
 function validateErrors(raw: Record<string,any>, requireIdle: boolean) {
   const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
-  if (requireIdle && !["IDLE","FINISH"].includes(state)) throw new Error(`Printer state ${state} is not safely idle.`);
+  // Bambu keeps gcode_state FAILED after a cancelled/failed job until the next job or a reboot, even once
+  // print_error is 0 and HMS is clear. Accept it as idle only when the error checks below pass and the nozzle is cold.
+  const staleFailed = state === "FAILED" && finiteNumber(raw.print_error) === 0 && (finiteNumber(raw.nozzle_temper) ?? Infinity) <= 60;
+  if (requireIdle && !["IDLE","FINISH"].includes(state) && !staleFailed) throw new Error(`Printer state ${state} is not safely idle.`);
   if (!requireIdle && !["IDLE","FINISH","RUNNING","PAUSE"].includes(state)) throw new Error(`Printer state ${state} is unknown or failed.`);
   if (finiteNumber(raw.print_error) !== 0) throw new Error("Printer reports a print error or did not report its error state.");
   if (!Array.isArray(raw.hms)) throw new Error("Printer HMS error state is missing or malformed.");

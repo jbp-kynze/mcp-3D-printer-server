@@ -190,6 +190,7 @@ test("an inspected print uploads its private copy when the caller's file changes
   assert.equal(publish.param, "Metadata/plate_1.gcode");
   assert.equal(publish.url, `file:///sdcard${upload.remote}`);
   assert.equal(publish.use_ams, false);
+  assert.equal(publish.layer_inspect, false, "first-layer inspection is off unless the caller asks for it");
   assert.equal(result.sha256.length, 64);
 });
 

@@ -20,10 +20,25 @@
   and MCP tests with a fake slicer and stubbed printer transports, and one real
   OrcaSlicer 2.4.3 slice (X1C 0.4, hardened steel, Bambu ABS, three objects) whose
   plate G-code carried the 30 snippet lines once, directly before
-  `M221 R; pop softend status`, and matched an unpatched slice otherwise. No
-  print was started; the snippet has not run on hardware through this path.
+  `M221 R; pop softend status`, and matched an unpatched slice otherwise. One real
+  X1 Carbon print (firmware 01.07, nozzle wiper installed) was sliced through
+  this path, and the wipe was seen running at the end of the nozzle-cleaning
+  stage.
+
+### Changed
+
+- Bambu print starts no longer request first-layer inspection unless the
+  caller passes `layer_inspect: true`. It used to default to on. Checked
+  against a mocked MQTT dispatch; real X1 Carbon prints on firmware 01.07 ran
+  with it off.
 
 ### Fixed
+
+- Accept a Bambu printer whose `gcode_state` is still `FAILED` from a cancelled
+  or failed job as idle, but only when `print_error` is 0, HMS has no
+  actionable entries, and the nozzle reports 60 °C or less. The printers keep
+  that state until the next job or a reboot, which used to block every new
+  print. Unit-tested against mocked reports only.
 
 - Keep the server alive and answer `get_printer_status` for Bambu printers that
   broadcast reports but do not answer bambu-node's initial request (seen on two

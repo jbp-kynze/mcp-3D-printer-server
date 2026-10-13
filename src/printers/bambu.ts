@@ -443,7 +443,7 @@ export class BambuImplementation extends PrinterImplementation {
         subtask_name: options.projectName,
         md5,
         flow_cali: options.flowCalibration ?? true,
-        layer_inspect: options.layerInspect ?? true,
+        layer_inspect: options.layerInspect ?? false,
         vibration_cali: options.vibrationCalibration ?? true,
         bed_leveling: options.bedLeveling ?? true,
         bed_type: options.bedType || "textured_plate",
