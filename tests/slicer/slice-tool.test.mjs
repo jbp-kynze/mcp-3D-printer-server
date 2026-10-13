@@ -85,10 +85,11 @@ const out = path.join(args[args.indexOf("--outputdir") + 1], args[args.indexOf("
 if (mode === "exit239") { console.log("[error] plate 1: Nothing to be sliced"); console.error("fatal: slicing failed"); process.exit(239); }
 if (mode === "segv") process.kill(process.pid, "SIGSEGV");
 if (mode === "nooutput") process.exit(0);
-fs.copyFileSync(path.join(${JSON.stringify(fixtures)}, mode === "md5only" ? "md5only.3mf" : "ok.3mf"), out);
+const named = path.join(${JSON.stringify(fixtures)}, mode + ".3mf");
+fs.copyFileSync(fs.existsSync(named) ? named : path.join(${JSON.stringify(fixtures)}, "ok.3mf"), out);
 `, { mode: 0o755 });
 
-  return { root, bbl, write, leaf, executable, capture, modeFile,
+  return { root, bbl, write, leaf, executable, capture, modeFile, fixtures,
     setMode: (mode) => fs.writeFile(modeFile, mode),
     args: async () => JSON.parse(await fs.readFile(capture, "utf8")),
     resetCapture: () => fs.rm(capture, { force: true }) };
@@ -436,14 +437,41 @@ test("machine settings inside a template or process profile never replace the se
   assert.deepEqual(JSON.parse(await fs.readFile(standaloneProcess, "utf8")).machine_start_gcode, "; FOREIGN STANDALONE", "the caller's file is not modified");
 });
 
-test("a per-server start G-code patch reaches the CLI machine preset and is reported by both slice tools", async (t) => {
-  const install = await createFakeInstall(t);
+const WIPE = ";===== test wipe start\nG1 Z10 F1200\n;===== test wipe end";
+const PATCHED_START = `${WIPE}\n;===== machine: P1S =====`;
+
+async function startPatchedServer(t, install) {
   const snippet = path.join(install.root, "wipe.gcode");
-  await fs.writeFile(snippet, ";===== test wipe start\nG1 Z10 F1200\n;===== test wipe end\n");
-  const { call } = await startServer(t, install, {
+  await fs.writeFile(snippet, `${WIPE}\n`);
+  return startServer(t, install, {
     BAMBU_START_GCODE_INSERT_FILE: snippet, BAMBU_START_GCODE_INSERT_BEFORE: ";===== machine: P1S =====",
     BAMBU_START_GCODE_INSERT_PRESETS: P1S,
   });
+}
+
+/** Fake slicer outputs: the plate G-code a real CLI would write for the patched preset, and broken variants. */
+async function writePatchedOutputs(install) {
+  const plate = (body) => zipBytes({
+    "Metadata/plate_1.gcode": [
+      "; HEADER_BLOCK_START", body, "; CHANGE_LAYER", "G1 X1",
+      "; change_filament_gcode = M620 S[next_extruder]A",
+      // The settings dump escapes newlines, so it is one comment line.
+      `; machine_start_gcode = ${PATCHED_START.replaceAll("\n", "\\n")}`, "",
+    ].join("\n"),
+  });
+  const lines = (...values) => values.join("\n");
+  await fs.writeFile(path.join(install.fixtures, "patched.3mf"), await plate(lines(
+    ";===== test wipe start", "G1 Z10 F1200", "M73 P1 R9", ";===== test wipe end", "M73 P2 R9", ";===== machine: P1S =====", "G28")));
+  await fs.writeFile(path.join(install.fixtures, "unpatched.3mf"), await plate(lines(";===== machine: P1S =====", "G28")));
+  await fs.writeFile(path.join(install.fixtures, "moved.3mf"), await plate(lines(
+    ";===== test wipe start", "G1 Z10 F1200", ";===== test wipe end", "G28", ";===== machine: P1S =====")));
+}
+
+test("a per-server start G-code patch reaches the CLI machine preset and is reported by both slice tools", async (t) => {
+  const install = await createFakeInstall(t);
+  await writePatchedOutputs(install);
+  await install.setMode("patched");
+  const { call } = await startPatchedServer(t, install);
   // A template exported for another printer must not replace the patched start G-code either.
   await fs.mkdir(path.join(install.root, "templates"), { recursive: true });
   await fs.writeFile(path.join(install.root, "templates", "foreign.json"),
@@ -452,12 +480,14 @@ test("a per-server start G-code patch reaches the CLI machine preset and is repo
     await install.resetCapture();
     const result = await call(tool, { stl_path: SAMPLE_STL, bambu_model: "p1s", ...args });
     assert.equal(result.isError, undefined, text(result));
-    const [outputPath, note] = text(result).split("\n");
-    await assertSliced(outputPath);
-    assert.match(note, /^Start G-code patch applied to "Bambu Lab P1S 0\.4 nozzle": inserted 3 line\(s\) at machine_start_gcode line 1/);
+    // The first content item stays the bare output path; the note is a separate item.
+    assert.equal(result.content.length, 2);
+    assert.equal(text(result).includes("\n"), false);
+    await assertSliced(text(result));
+    assert.match(result.content[1].text, /^Start G-code patch applied to "Bambu Lab P1S 0\.4 nozzle": inserted 3 line\(s\) at machine_start_gcode line 1/);
     const cliArgs = await install.args();
     const machine = JSON.parse(await fs.readFile(cliArgs[cliArgs.indexOf("--load-settings") + 1].split(";")[0], "utf8"));
-    assert.equal(machine.machine_start_gcode, ";===== test wipe start\nG1 Z10 F1200\n;===== test wipe end\n;===== machine: P1S =====", tool);
+    assert.equal(machine.machine_start_gcode, PATCHED_START, tool);
     assert.equal(machine.change_filament_gcode, "M620 S[next_extruder]A ; P1S AMS", "change_filament_gcode is never patched");
   }
   // A different preset on this server fails closed before the slicer runs.
@@ -468,6 +498,24 @@ test("a per-server start G-code patch reaches the CLI machine preset and is repo
   await assertNotExecuted(install);
 });
 
+test("slice_stl fails closed when the sliced plate G-code lacks the applied start G-code patch", async (t) => {
+  const install = await createFakeInstall(t);
+  await writePatchedOutputs(install);
+  const { call, tempDir } = await startPatchedServer(t, install);
+  for (const [mode, error] of [
+    ["unpatched", /not correctly present in the sliced output Metadata\/plate_1\.gcode: its first line ";===== test wipe start" appears 0 times as a G-code line/],
+    ["moved", /followed by "G28" instead of the anchor line ";===== machine: P1S ====="/],
+  ]) {
+    await install.setMode(mode);
+    const result = await call("slice_stl", { stl_path: SAMPLE_STL, bambu_model: "p1s" });
+    assert.equal(result.isError, true, mode);
+    assert.match(text(result), error, mode);
+  }
+  // No unverified sliced project is left where a later print could pick it up.
+  const outputs = (await fs.readdir(tempDir, { recursive: true })).filter((name) => String(name).endsWith("_sliced.3mf"));
+  assert.deepEqual(outputs, []);
+});
+
 test("without BAMBU_START_GCODE_INSERT_FILE the slice result and start G-code stay stock", async (t) => {
   const install = await createFakeInstall(t);
   const { call } = await startServer(t, install, {
@@ -475,7 +523,8 @@ test("without BAMBU_START_GCODE_INSERT_FILE the slice result and start G-code st
   });
   const result = await call("slice_stl", { stl_path: SAMPLE_STL, bambu_model: "p1s" });
   assert.equal(result.isError, undefined, text(result));
-  assert.equal(text(result).includes("\n"), false, "the result is only the output path");
+  assert.equal(result.content.length, 1, "the result is only the output path");
+  assert.equal(text(result).includes("\n"), false);
   const cliArgs = await install.args();
   const machine = JSON.parse(await fs.readFile(cliArgs[cliArgs.indexOf("--load-settings") + 1].split(";")[0], "utf8"));
   assert.equal(machine.machine_start_gcode, ";===== machine: P1S =====");

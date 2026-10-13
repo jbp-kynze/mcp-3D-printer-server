@@ -20,6 +20,7 @@ import { SlicerError, asPreparationError } from '../slicer/slicer-error.js';
 import {
   START_GCODE_PATCH_ENV,
   startGcodePatchConfigFromEnv,
+  verifyStartGcodePatchInSlicedProject,
   type StartGcodePatchConfig,
   type StartGcodePatchReport,
 } from '../slicer/start-gcode-patch.js';
@@ -1190,6 +1191,11 @@ export class STLManipulator extends EventEmitter {
             throw new Error(`Slicer exited successfully but did not write ${bambuExport.producedPath}.`);
           }
           await assertSlicedProjectOutput(bambuExport.producedPath);
+          // The patch was applied to the profile; prove the slicer kept it
+          // where it belongs in every plate before anyone can print the file.
+          if (startGcodePatchReport) {
+            await verifyStartGcodePatchInSlicedProject(bambuExport.producedPath, startGcodePatchReport);
+          }
           fs.mkdirSync(path.dirname(bambuExport.finalPath), { recursive: true });
           fs.renameSync(bambuExport.producedPath, bambuExport.finalPath);
         } else if (slicerType === 'orcaslicer') {

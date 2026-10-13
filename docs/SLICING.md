@@ -99,8 +99,15 @@ The rules:
 - Only `machine_start_gcode` changes. `change_filament_gcode`, the end G-code, and every other key stay as the preset defines them, and the bundled preset file on disk is never edited (the server writes a patched copy for the CLI).
 - It fails closed. A missing or empty snippet, a missing or repeated anchor, an anchor outside the section, a preset outside `BAMBU_START_GCODE_INSERT_PRESETS`, or a partial configuration stops the slice before the slicer runs. With the hook on, the server also refuses slices that cannot use a Bambu machine preset (generic OrcaSlicer without `bambu_model`).
 - It is idempotent. If the whole snippet is already in the start G-code (found by its first non-blank line), nothing is inserted again. Two copies, or a first line that matches without the rest of the snippet, stop the slice, so start the snippet with a unique comment line.
-- It is reported. The server log and the `slice_stl` / `slice_with_template` result name the preset, the line, the anchor, the file and its SHA-256 prefix. `print_3mf` auto-slicing and `process_and_print_stl` go through the same preparation and add a `start_gcode_patch` field to their result.
-- Print safety checks are unchanged. A `.3mf` that is already sliced is printed as it is, so slice it through this server (or include the snippet yourself) if the printer needs it.
+- An existing copy counts only where it belongs: directly before the anchor, and inside the section when one is set. A copy anywhere else stops the slice.
+- The sliced output is checked. In every plate's G-code, the snippet's first line must appear exactly once as a G-code line (the one-line `; machine_start_gcode = ` settings dump does not count), before the first layer change, with its last line directly followed by the anchor. `M73` progress lines that the slicer inserts inside the block are allowed. `change_filament_gcode` must not contain it. Otherwise the slice is rejected, also when `print_3mf` auto-slices. The check compares the snippet's first and last lines and its line count, so a snippet that uses slicer conditionals (`{if}`) that change its line count is rejected.
+- It is reported. The server log names the preset, the line, the anchor, the file and its SHA-256 prefix. `slice_stl` and `slice_with_template` return the bare output path as their first text item and this note as a second one. `print_3mf` auto-slicing and `process_and_print_stl` go through the same preparation and add a `start_gcode_patch` field to their result.
+- Print safety checks are unchanged.
+
+Limits:
+
+- Only slices made by this server get the snippet. A pre-sliced `.3mf` passed to `print_3mf`, and files sent with `upload_gcode` or `start_print`, are printed as they are, with no wipe, even when the hook is on. Slice through this server (or include the snippet yourself) if the printer needs it.
+- After a cancelled or failed job, Bambu printers keep reporting `FAILED`. The server accepts that as idle only while the nozzle is at or below 60 °C with no heating target, so preheating the nozzle in that state blocks the next print until it cools (it fails closed).
 
 Example for an X1C with a nozzle wiper, inserting the wipe just before the stock "pop soft endstop" line of its wipe section:
 
@@ -114,7 +121,7 @@ BAMBU_START_GCODE_INSERT_PRESETS="Bambu Lab X1 Carbon 0.4 nozzle"
 
 Set these only on the server for the printer that has the hardware. Keep G-code with absolute Z moves out of filament-change G-code; the hook never writes there.
 
-**Evidence.** OrcaSlicer 2.4.3 sliced a three-object X1C 0.4 job in Bambu ABS with this example and the stock profile tree: the 30 snippet lines appeared once, directly before `M221 R; pop softend status`, and the plate G-code otherwise matched an unpatched slice apart from time estimates and object IDs. The wipe G-code itself has not been run on a printer through this path.
+**Evidence.** OrcaSlicer 2.4.3 sliced a three-object X1C 0.4 job in Bambu ABS with this example and the stock profile tree: the 30 snippet lines appeared once, directly before `M221 R; pop softend status`, and the plate G-code otherwise matched an unpatched slice apart from time estimates and object IDs. One real X1 Carbon print (firmware 01.07, nozzle wiper installed) was sliced through this path, and the wipe was seen running at the end of the nozzle-cleaning stage. Other models, firmware, and slicers have not been tested here.
 
 ## Slicing templates
 

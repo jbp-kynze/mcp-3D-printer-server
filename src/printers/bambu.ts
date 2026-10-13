@@ -224,19 +224,30 @@ export class BambuImplementation extends PrinterImplementation {
     await requireHumanConfirmation(this.confirm, message, "bambu", physicalCheck);
   }
 
+  /** States after which a previous part or failed-print debris may still be on the bed. */
+  private static readonly ENDED_JOB_STATES = ["FINISH", "FAILED"];
+
+  private endedJobState(status: any): string | undefined {
+    const state = typeof status.raw?.gcode_state === "string" ? status.raw.gcode_state.toUpperCase() : undefined;
+    return state !== undefined && BambuImplementation.ENDED_JOB_STATES.includes(state) ? state : undefined;
+  }
+
+  /** FINISH and an accepted stale FAILED both require a physical bed-clearance confirmation. */
   private finishedJobIdentity(status: any): string | undefined {
-    return status.raw.gcode_state === "FINISH"
-      ? JSON.stringify([status.raw.gcode_file, status.raw.subtask_name, status.raw.task_id, status.raw.subtask_id])
+    const state = this.endedJobState(status);
+    return state !== undefined
+      ? JSON.stringify([state, status.raw.gcode_file, status.raw.subtask_name, status.raw.task_id, status.raw.subtask_id])
       : undefined;
   }
 
   async confirmPrintPreflight(serial: string, status: any, inspection: PrintFileInspection): Promise<string | undefined> {
     const finishedJob = this.finishedJobIdentity(status);
+    const endedState = this.endedJobState(status);
     await this.confirmHardwareAction(
       `Start a checked print on ${inspection.model.toUpperCase()} (${serial})? Nozzles: ${inspection.nozzleDiameters.join(", ")} mm. ` +
       `Materials: ${inspection.materials.join(", ")}. Peak targets: nozzle ${inspection.maxNozzleTemperature}°C, bed ${inspection.maxBedTemperature}°C, chamber ${inspection.maxChamberTemperature}°C. ` +
       `File SHA-256: ${inspection.sha256}. Confirm the physical spool labels and that the build plate is clear.` +
-      (finishedJob !== undefined ? " The printer reports FINISH: remove the previous part and debris before confirming." : ""),
+      (finishedJob !== undefined ? ` The printer reports ${endedState}: remove the previous part and debris before confirming.` : ""),
       finishedJob !== undefined
     );
     return finishedJob;
@@ -245,7 +256,7 @@ export class BambuImplementation extends PrinterImplementation {
   assertBedClearance(status: any, confirmedFinishedJob: string | undefined): void {
     const current = this.finishedJobIdentity(status);
     if (current !== undefined && current !== confirmedFinishedJob) {
-      throw new Error("Printer reports a newly finished job. Confirm that its part and debris have been removed before retrying the print.");
+      throw new Error("Printer reports a newly finished or failed job. Confirm that its part and debris have been removed before retrying the print.");
     }
   }
 

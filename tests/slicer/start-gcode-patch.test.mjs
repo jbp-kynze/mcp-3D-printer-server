@@ -14,6 +14,8 @@ import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyStartGcodePatch,
   startGcodePatchConfigFromEnv,
+  verifyStartGcodePatchInPlate,
+  verifyStartGcodePatchInSlicedProject,
 } from "../../dist/slicer/start-gcode-patch.js";
 import { BambuCliProfilePreparer } from "../../dist/slicer/bambu-cli.js";
 import { STLManipulator } from "../../dist/stl/stl-manipulator.js";
@@ -203,6 +205,22 @@ test("insertion is idempotent: a preset that already carries the snippet is not 
   // Two copies of the marker cannot be resolved safely.
   const doubled = `${once.machine.machine_start_gcode}\n${MARKER}`;
   assert.throws(() => applyStartGcodePatch(machine(doubled), PRESET, config), /already appears 2 times/);
+  // An existing copy that is not directly before the anchor is not accepted as applied.
+  const snippetBlock = once.machine.machine_start_gcode.split("\n").slice(once.report.startLine - 1, once.report.startLine + 3);
+  const misplaced = [snippetBlock.join("\n"), START_GCODE].join("\n");
+  assert.throws(() => applyStartGcodePatch(machine(misplaced), PRESET, config),
+    /already in machine_start_gcode at line 1, but not directly before the anchor line/);
+  const separated = once.machine.machine_start_gcode.replace(`;===== End of Test Wipe\n${ANCHOR}`, `;===== End of Test Wipe\nG4 P0\n${ANCHOR}`);
+  assert.throws(() => applyStartGcodePatch(machine(separated), PRESET, config), /not directly before the anchor line/);
+  // An existing copy directly before the anchor still needs the anchor inside the section.
+  const outsideSection = [";===== machine: P1S =====", ...snippetBlock, ANCHOR, "M400"].join("\n");
+  assert.throws(() => applyStartGcodePatch(machine(outsideSection), PRESET, config), /is not inside the ";===== wipe nozzle =====" \.\.\. ";===== wipe nozzle end" section/);
+  assert.equal(applyStartGcodePatch(machine(outsideSection), PRESET, { file, anchor: ANCHOR }).report.status, "already-present",
+    "without a section guard the same placement is accepted");
+  // An existing copy that starts before the section marker is rejected.
+  const markerSnippet = await snippetFile(t, `${MARKER}\n${SECTION_START} (snippet)\nG90\n`);
+  const straddling = [";===== machine: P1S =====", MARKER, `${SECTION_START} (snippet)`, "G90", ANCHOR, SECTION_END].join("\n");
+  assert.throws(() => applyStartGcodePatch(machine(straddling), PRESET, { ...config, file: markerSnippet }), /starts outside the ";===== wipe nozzle =====" section/);
   // A first line that matches without the rest of the snippet is ambiguous.
   const generic = await snippetFile(t, "G28\nG1 Z10 F1200\n");
   assert.throws(() => applyStartGcodePatch(machine(), PRESET, { ...config, file: generic }),
@@ -279,7 +297,7 @@ test("sliceSTL fails before running the slicer when the patch cannot be applied"
 });
 
 /** print_3mf with stubbed transports; prepare runs for real and then stops the slice. */
-async function print3mfServer(t, env) {
+async function print3mfServer(t, env, { stopAfterPrepare = true } = {}) {
   const dir = await tempDir(t, "start-gcode-print3mf-");
   const eventsPath = path.join(dir, "events.jsonl");
   const preload = path.join(dir, "boundaries.mjs");
@@ -297,7 +315,8 @@ async function print3mfServer(t, env) {
       const bundle = await prepare.apply(this, args);
       const machine = JSON.parse(fs.readFileSync(bundle.settingsArg.split(";")[0], "utf8"));
       log({ action: "prepared", start: machine.machine_start_gcode, change: machine.change_filament_gcode, report: bundle.startGcodePatch ?? null });
-      throw new Error("test stops after profile preparation");
+      if (${JSON.stringify(stopAfterPrepare)}) throw new Error("test stops after profile preparation");
+      return bundle;
     };
   `);
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "start-gcode-cwd-"));
@@ -369,4 +388,122 @@ test("print_3mf auto-slicing applies the same start G-code patch, and fails clos
     assert.equal(log[0].start, START_GCODE);
     assert.equal(log[0].report, null);
   });
+});
+
+// ---- Verification of the sliced output ------------------------------------
+
+const WIPE_LINES = [MARKER, "G90", "G1 Z10 F1200", ";===== End of Test Wipe"];
+const patchReport = async (t) => applyStartGcodePatch(machine(), PRESET, { file: await snippetFile(t), anchor: ANCHOR }).report;
+const startDump = `; machine_start_gcode = ${[...WIPE_LINES, ANCHOR].join("\\n")}`;
+/** Plate G-code shaped like OrcaSlicer output: header, start G-code, layers, then the settings dump. */
+const plateGcode = (start, { changeFilament = "M620 S[next_extruder]A", tail = [] } = {}) => [
+  "; HEADER_BLOCK_START", "; HEADER_BLOCK_END", "; EXECUTABLE_BLOCK_START", ...start,
+  "; CHANGE_LAYER", "G1 X10 Y10", ...tail, "; EXECUTABLE_BLOCK_END",
+  `; change_filament_gcode = ${changeFilament}`, startDump, "",
+].join("\n");
+const goodStart = ["G28", ...WIPE_LINES, ANCHOR, "G1 Z10 F1200"];
+
+test("plate verification accepts the snippet directly before the anchor, with slicer progress lines inside", async (t) => {
+  const report = await patchReport(t);
+  assert.doesNotThrow(() => verifyStartGcodePatchInPlate(plateGcode(goodStart), report));
+  const withProgress = ["G28", MARKER, "M73 P1 R9", "G90", "G1 Z10 F1200", "M73 P2 R9", ";===== End of Test Wipe", "M73 P3 R8", ANCHOR];
+  assert.doesNotThrow(() => verifyStartGcodePatchInPlate(plateGcode(withProgress).replaceAll("\n", "\r\n"), report));
+});
+
+test("plate verification fails closed when the snippet is missing, doubled, misplaced, or in filament-change G-code", async (t) => {
+  const report = await patchReport(t);
+  const cases = [
+    // The settings dump alone (one comment line) never counts as the snippet.
+    ["only in the settings dump", plateGcode(["G28", ANCHOR]), /appears 0 times as a G-code line/],
+    ["twice", plateGcode(goodStart, { tail: WIPE_LINES }), /appears 2 times as a G-code line/],
+    ["after the first layer change", plateGcode(["G28", ANCHOR], { tail: [...WIPE_LINES, ANCHOR] }), /after the first layer change/],
+    ["not followed by the anchor", plateGcode(["G28", ...WIPE_LINES, "G4 P0", ANCHOR]), /followed by "G4 P0" instead of the anchor line/],
+    ["truncated", plateGcode(["G28", MARKER, "G90", ANCHOR]), /is not where the 4-line snippet should end/],
+    ["in change_filament_gcode", plateGcode(goodStart, { changeFilament: `M620 S[next_extruder]A\\n${MARKER}\\nG1 Z10` }), /change_filament_gcode contains the snippet/],
+  ];
+  for (const [name, gcode, error] of cases) {
+    assert.throws(() => verifyStartGcodePatchInPlate(gcode, report), error, name);
+  }
+});
+
+async function slicedProject(t, plates, projectSettings) {
+  const file = path.join(await tempDir(t, "start-gcode-sliced-"), "job_sliced.3mf");
+  const zip = new JSZip();
+  for (const [name, gcode] of Object.entries(plates)) zip.file(name, gcode);
+  if (projectSettings) zip.file("Metadata/project_settings.config", JSON.stringify(projectSettings));
+  await fs.writeFile(file, await zip.generateAsync({ type: "nodebuffer" }));
+  return file;
+}
+
+test("every sliced plate and the project settings are checked", async (t) => {
+  const report = await patchReport(t);
+  const good = plateGcode(goodStart);
+  assert.deepEqual(await verifyStartGcodePatchInSlicedProject(await slicedProject(t, {
+    "Metadata/plate_1.gcode": good, "Metadata/plate_2.gcode": good, "Metadata/plate_3.gcode": "", "Metadata/plate_1.gcode.md5": "x",
+  }, { change_filament_gcode: "M620 S[next_extruder]A" }), report), ["Metadata/plate_1.gcode", "Metadata/plate_2.gcode"]);
+  await assert.rejects(verifyStartGcodePatchInSlicedProject(await slicedProject(t, {
+    "Metadata/plate_1.gcode": good, "Metadata/plate_2.gcode": plateGcode(["G28", ANCHOR]),
+  }), report), /not correctly present in the sliced output Metadata\/plate_2\.gcode: .*appears 0 times.*Refusing to use this slice/s);
+  await assert.rejects(verifyStartGcodePatchInSlicedProject(await slicedProject(t, { "Metadata/plate_1.gcode": good },
+    { change_filament_gcode: `M620 S[next_extruder]A\n${MARKER}\nG1 Z10` }), report),
+    /Metadata\/project_settings\.config: change_filament_gcode contains the snippet/);
+  await assert.rejects(verifyStartGcodePatchInSlicedProject(await slicedProject(t, { "Metadata/plate_1.gcode.md5": "x" }), report),
+    /no sliced plate G-code to check/);
+});
+
+/** A fake Bambu CLI (POSIX shebang script) that copies a prepared sliced project. */
+async function fakeSlicer(t, outputFixture) {
+  const dir = await tempDir(t, "start-gcode-fake-cli-");
+  const executable = path.join(dir, "fake-bambu-cli");
+  const ran = path.join(dir, "ran.json");
+  await fs.writeFile(executable, `#!${process.execPath}
+const fs = require("fs"); const path = require("path");
+const args = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(ran)}, JSON.stringify(args));
+fs.copyFileSync(${JSON.stringify(outputFixture)}, path.join(args[args.indexOf("--outputdir") + 1], args[args.indexOf("--export-3mf") + 1]));
+`, { mode: 0o755 });
+  return { executable, ran };
+}
+
+const posixOnly = { skip: process.platform === "win32" ? "the fake slicer is a POSIX shebang script" : false };
+
+test("sliceSTL verifies the slicer's output and never returns a slice without the applied patch", posixOnly, async (t) => {
+  const tree = await profileTree(t);
+  const file = await snippetFile(t);
+  withEnv(t, { BAMBU_PROFILES_ROOT: tree.profiles, BAMBU_SLICER_PROFILE_DIRS: "",
+    BAMBU_START_GCODE_INSERT_FILE: file, BAMBU_START_GCODE_INSERT_BEFORE: ANCHOR });
+  const input = path.join(tree.root, "model.stl");
+  await fs.writeFile(input, "solid fixture");
+  const manipulator = new STLManipulator(path.join(tree.root, "out"));
+  const slice = (executable) => manipulator.sliceSTL(input, "bambustudio", executable, undefined, undefined, PRESET, undefined, {});
+
+  const good = await fakeSlicer(t, await slicedProject(t, { "Metadata/plate_1.gcode": plateGcode(goodStart) }));
+  const output = await slice(good.executable);
+  assert.equal(manipulator.takeStartGcodePatchReport(output)?.status, "inserted");
+
+  const stock = await fakeSlicer(t, await slicedProject(t, { "Metadata/plate_1.gcode": plateGcode(["G28", ANCHOR]) }));
+  await assert.rejects(slice(stock.executable),
+    (error) => error.phase === "output" && /not correctly present in the sliced output Metadata\/plate_1\.gcode/.test(error.message));
+  await fs.access(stock.ran); // the slicer ran; its output was rejected afterwards
+});
+
+test("print_3mf auto-slicing rejects slicer output without the applied patch before any printer contact", posixOnly, async (t) => {
+  const tree = await profileTree(t);
+  const file = await snippetFile(t);
+  const project = await unslicedProject(t);
+  const patchEnv = { BAMBU_PROFILES_ROOT: tree.profiles, BAMBU_START_GCODE_INSERT_FILE: file,
+    BAMBU_START_GCODE_INSERT_BEFORE: ANCHOR, BAMBU_START_GCODE_INSERT_PRESETS: PRESET };
+  const stock = await fakeSlicer(t, await slicedProject(t, { "Metadata/plate_1.gcode": plateGcode(["G28", ANCHOR]) }));
+  const { client, events } = await print3mfServer(t, { ...patchEnv, SLICER_PATH: stock.executable }, { stopAfterPrepare: false });
+  const result = await client.callTool({ name: "print_3mf", arguments: { three_mf_path: project } });
+  assert.equal(result.isError, true);
+  assert.match(errorText(result), /Auto-slicing failed; nothing was uploaded or started: .*Start G-code patch .*not correctly present in the sliced output Metadata\/plate_1\.gcode/s);
+  assert.deepEqual((await events()).map(({ action }) => action), ["prepared"], "no printer boundary may be reached");
+
+  // With a correct slice, verification passes and the job moves on to the (stubbed) printer checks.
+  const good = await fakeSlicer(t, await slicedProject(t, { "Metadata/plate_1.gcode": plateGcode(goodStart) }));
+  const passed = await print3mfServer(t, { ...patchEnv, SLICER_PATH: good.executable }, { stopAfterPrepare: false });
+  const next = await passed.client.callTool({ name: "print_3mf", arguments: { three_mf_path: project } });
+  assert.doesNotMatch(errorText(next), /Start G-code patch|Auto-slicing failed/);
+  assert.ok((await passed.events()).some(({ action }) => action === "prepared"));
 });

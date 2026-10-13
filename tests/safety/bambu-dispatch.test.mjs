@@ -170,6 +170,48 @@ test("confirmation opt-out skips ordinary prompts but a finished bed still needs
   }
 });
 
+test("a stale FAILED state needs the same physical bed-clearance confirmation as FINISH", async (t) => {
+  const file = await fixture(t);
+  const staleFailed = (raw = {}) => safetyStatus({ state: "FAILED", nozzle_temper: 30, nozzle_target_temper: 0, task_id: "1", ...raw });
+  const previous = { BAMBU_REQUIRE_CONFIRMATION: process.env.BAMBU_REQUIRE_CONFIRMATION, PRINT_REQUIRE_CONFIRMATION: process.env.PRINT_REQUIRE_CONFIRMATION };
+  t.after(() => { for (const [key, old] of Object.entries(previous)) { if (old === undefined) delete process.env[key]; else process.env[key] = old; } });
+  delete process.env.PRINT_REQUIRE_CONFIRMATION;
+
+  // Even with ordinary prompts opted out, a failed job's bed is a physical check.
+  process.env.BAMBU_REQUIRE_CONFIRMATION = "0";
+  const prompts = [];
+  const declined = isolatedPrinter(staleFailed(), async (message) => { prompts.push(message); return false; });
+  await assert.rejects(print3mf(declined.printer, file), /confirmation/i);
+  assert.equal(prompts.length, 1, "stale FAILED bed clearance is a physical check");
+  assert.match(prompts[0], /The printer reports FAILED: remove the previous part and debris before confirming\./);
+  assertNoDispatch(declined.events);
+  delete process.env.BAMBU_REQUIRE_CONFIRMATION;
+
+  // Confirmed clearance of the same failed job may print.
+  const accepted = isolatedPrinter(staleFailed(), async () => true);
+  assert.equal((await print3mf(accepted.printer, file)).status, "success");
+
+  // A different ended job appearing after confirmation must stop the print.
+  const changed = isolatedPrinter(staleFailed(), async () => true);
+  let reads = 0;
+  changed.printer.getSafetyStatus = async () => {
+    changed.events.push({ action: "status" });
+    return ++reads === 1 ? staleFailed() : staleFailed({ task_id: "2" });
+  };
+  await assert.rejects(print3mf(changed.printer, file), /newly finished or failed job/);
+  assertNoDispatch(changed.events);
+
+  // FINISH followed by FAILED of the same task is also a new bed state.
+  const transitioned = isolatedPrinter(safetyStatus({ state: "FINISH", task_id: "1" }), async () => true);
+  reads = 0;
+  transitioned.printer.getSafetyStatus = async () => {
+    transitioned.events.push({ action: "status" });
+    return ++reads === 1 ? safetyStatus({ state: "FINISH", task_id: "1" }) : staleFailed();
+  };
+  await assert.rejects(print3mf(transitioned.printer, file), /newly finished or failed job/);
+  assertNoDispatch(transitioned.events);
+});
+
 test("an inspected print uploads its private copy when the caller's file changes", async (t) => {
   const file = await fixture(t);
   const expected = await fs.readFile(file);

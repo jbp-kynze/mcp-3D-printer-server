@@ -24,6 +24,11 @@ import { PrinterFactory } from "./printers/printer-factory.js";
 import { STLManipulator, type BambuSliceOptions } from "./stl/stl-manipulator.js";
 import { SlicerError } from "./slicer/slicer-error.js";
 import { describeStartGcodePatch } from "./slicer/start-gcode-patch.js";
+
+/** A tool result returned as several text content items, in order. */
+class ToolTextItems {
+  constructor(readonly texts: string[]) {}
+}
 import {
   inspectSliceSettings,
   listTemplateRegistry,
@@ -669,7 +674,7 @@ class ThreeDPrinterMCPServer {
   }
 
   /** Shared slice_stl / slice_with_template implementation. */
-  private async runSliceTool(toolName: string, args: Record<string, unknown> | undefined): Promise<string> {
+  private async runSliceTool(toolName: string, args: Record<string, unknown> | undefined): Promise<string | ToolTextItems> {
     if (!args?.stl_path) {
       throw new Error("Missing required parameter: stl_path");
     }
@@ -731,8 +736,8 @@ class ThreeDPrinterMCPServer {
       options
     );
     const patchNote = this.startGcodePatchNote(outputPath);
-    return patchNote ? `${outputPath}
-${patchNote}` : outputPath;
+    // The first text item stays the bare output path for callers that use it as a path.
+    return patchNote ? new ToolTextItems([outputPath, patchNote]) : outputPath;
   }
 
   /** Describe (once) the per-server start G-code patch applied to a sliced output. */
@@ -744,8 +749,7 @@ ${patchNote}` : outputPath;
   /** Attach the start G-code patch note to a tool result without changing its other fields. */
   private withStartGcodePatchNote(result: unknown, patchNote: string | undefined): unknown {
     if (!patchNote) return result;
-    if (typeof result === "string") return `${result}
-${patchNote}`;
+    if (typeof result === "string") return `${result}\n${patchNote}`;
     if (result && typeof result === "object" && !Array.isArray(result)) return { ...result, start_gcode_patch: patchNote };
     return { result, start_gcode_patch: patchNote };
   }
@@ -2586,6 +2590,9 @@ ${patchNote}`;
             throw new Error(`Unknown tool: ${name}`);
         }
 
+        if (result instanceof ToolTextItems) {
+          return { content: result.texts.map((text) => ({ type: "text", text })) };
+        }
         return {
           content: [
             {

@@ -14,9 +14,18 @@
   `machine_start_gcode` changes, never `change_filament_gcode`. A missing
   snippet, a missing or repeated anchor, an anchor outside the section, a preset
   that is not allowed, or a partial configuration stops the slice before the
-  slicer runs. The snippet is not inserted twice. `slice_stl`,
-  `slice_with_template`, `print_3mf` auto-slicing, and `process_and_print_stl`
-  report what was applied; the print safety gate is unchanged. Evidence: unit
+  slicer runs. The snippet is not inserted twice, and an existing copy is only
+  accepted directly before the anchor (and inside the section when one is
+  set). After slicing, every plate's G-code must contain the snippet's first
+  line exactly once as a G-code line, in the start G-code, with its last line
+  directly followed by the anchor (slicer `M73` progress lines are allowed in
+  between), and `change_filament_gcode` must not contain it; otherwise the slice
+  is rejected, including for `print_3mf` auto-slicing. `slice_stl` and
+  `slice_with_template` keep the bare output path as the first text item and
+  report what was applied in a second one; `print_3mf` auto-slicing and
+  `process_and_print_stl` add a `start_gcode_patch` field. The print safety
+  gate is unchanged. Pre-sliced `.3mf` files, `upload_gcode`, and `start_print`
+  are not modified, so they carry no snippet even when the hook is on. Evidence: unit
   and MCP tests with a fake slicer and stubbed printer transports, and one real
   OrcaSlicer 2.4.3 slice (X1C 0.4, hardened steel, Bambu ABS, three objects) whose
   plate G-code carried the 30 snippet lines once, directly before
@@ -35,10 +44,19 @@
 ### Fixed
 
 - Accept a Bambu printer whose `gcode_state` is still `FAILED` from a cancelled
-  or failed job as idle, but only when `print_error` is 0, HMS has no
-  actionable entries, and the nozzle reports 60 °C or less. The printers keep
-  that state until the next job or a reboot, which used to block every new
-  print. Unit-tested against mocked reports only.
+  or failed job as idle, but only on a single-extruder printer (no
+  `device.extruder.info`, or at most one entry) whose nozzle reports 60 °C or
+  less with a heating target (`nozzle_target_temper`) of exactly 0. The usual
+  `print_error` and HMS checks still apply. Dual-nozzle printers such as the
+  H2D stay strict and keep rejecting `FAILED`. The printers keep that state
+  until the next job or a reboot, which used to block every new print. A stale
+  `FAILED` gets the same physical bed-clearance confirmation as `FINISH`
+  ("remove the previous part and debris"), even when ordinary confirmations are
+  opted out, and a different finished or failed job appearing after that
+  confirmation stops the print. Preheating the nozzle above 60 °C (or setting
+  any nozzle target) while the printer still reports `FAILED` makes the next
+  print fail closed until the nozzle cools. Unit-tested against mocked reports
+  only.
 
 - Keep the server alive and answer `get_printer_status` for Bambu printers that
   broadcast reports but do not answer bambu-node's initial request (seen on two
