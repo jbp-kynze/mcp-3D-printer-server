@@ -76,6 +76,27 @@ test('rejects busy, failed, missing or unknown states while allowing IDLE and FI
   for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','FAILED','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
   assert.doesNotThrow(() => check(fresh({gcode_state:'FINISH'})));
 });
+test('accepts a stale FAILED state only on a cold, untargeted single-extruder printer with clean errors', () => {
+  const failed = (extra = {}) => fresh({gcode_state:'FAILED', nozzle_temper:35, nozzle_target_temper:0, ...extra});
+  assert.doesNotThrow(() => check(failed()));
+  assert.doesNotThrow(() => check(failed({nozzle_temper:60})));
+  // Nozzle must be cold.
+  assert.throws(() => check(failed({nozzle_temper:61})), /state|idle/i);
+  assert.throws(() => check(failed({nozzle_temper:undefined})), /state|idle/i);
+  assert.throws(() => check(failed({nozzle_temper:'cold'})), /state|idle/i);
+  // The nozzle target must be a finite number equal to 0.
+  for (const nozzle_target_temper of [undefined, null, '0', 'off', 1, 220, Number.NaN, Infinity]) {
+    assert.throws(() => check(failed({nozzle_target_temper})), /state|idle/i, `target ${String(nozzle_target_temper)}`);
+  }
+  // Single extruder only: no extruder table, or at most one entry.
+  assert.doesNotThrow(() => check(failed({device:{extruder:{info:[{id:0,temp:35}]}}})));
+  assert.doesNotThrow(() => check(failed({device:{extruder:{info:[]}}})));
+  assert.throws(() => check(failed({device:{extruder:{info:[{id:0,temp:35},{id:1,temp:35}]}}})), /state|idle/i);
+  assert.throws(() => check(failed({device:{extruder:{info:{id:0}}}})), /state|idle/i);
+  // print_error and HMS checks still apply.
+  assert.throws(() => check(failed({print_error:1})), /error/i);
+  assert.throws(() => check(failed({hms:[{attr:0x0C000300, code:0x00020002}]})), /HMS/i);
+});
 test('requires explicit clean print error and valid HMS severity, but permits informative HMS', () => {
   for(const print_error of [undefined,1,'03008004','not-a-number']) assert.throws(() => check(fresh({print_error})), /error/i);
   for(const hms of [undefined,'bad',[{attr:0,code:0x10001}],[{attr:0,code:0x20001}],[{attr:0,code:0x30001}],[{attr:0,code:0x50001}],[{attr:0}],[{severity:'info',code:0x10001}]]) assert.throws(() => check(fresh({hms})), /HMS/i);

@@ -23,6 +23,12 @@ import * as THREE from 'three';
 import { PrinterFactory } from "./printers/printer-factory.js";
 import { STLManipulator, type BambuSliceOptions } from "./stl/stl-manipulator.js";
 import { SlicerError } from "./slicer/slicer-error.js";
+import { describeStartGcodePatch } from "./slicer/start-gcode-patch.js";
+
+/** A tool result returned as several text content items, in order. */
+class ToolTextItems {
+  constructor(readonly texts: string[]) {}
+}
 import {
   inspectSliceSettings,
   listTemplateRegistry,
@@ -668,7 +674,7 @@ class ThreeDPrinterMCPServer {
   }
 
   /** Shared slice_stl / slice_with_template implementation. */
-  private async runSliceTool(toolName: string, args: Record<string, unknown> | undefined): Promise<string> {
+  private async runSliceTool(toolName: string, args: Record<string, unknown> | undefined): Promise<string | ToolTextItems> {
     if (!args?.stl_path) {
       throw new Error("Missing required parameter: stl_path");
     }
@@ -719,7 +725,7 @@ class ThreeDPrinterMCPServer {
     const slicerPath =
       this.resolveExecutableSelectorArg(args.slicer_path, toolName, "slicer_path") ?? defaultSlicerPathFor(slicerType);
 
-    return this.stlManipulator.sliceSTL(
+    const outputPath = await this.stlManipulator.sliceSTL(
       String(args.stl_path),
       slicerType,
       slicerPath,
@@ -729,6 +735,23 @@ class ThreeDPrinterMCPServer {
       filamentProfile,
       options
     );
+    const patchNote = this.startGcodePatchNote(outputPath);
+    // The first text item stays the bare output path for callers that use it as a path.
+    return patchNote ? new ToolTextItems([outputPath, patchNote]) : outputPath;
+  }
+
+  /** Describe (once) the per-server start G-code patch applied to a sliced output. */
+  private startGcodePatchNote(slicedPath: string): string | undefined {
+    const report = this.stlManipulator.takeStartGcodePatchReport(slicedPath);
+    return report ? describeStartGcodePatch(report) : undefined;
+  }
+
+  /** Attach the start G-code patch note to a tool result without changing its other fields. */
+  private withStartGcodePatchNote(result: unknown, patchNote: string | undefined): unknown {
+    if (!patchNote) return result;
+    if (typeof result === "string") return `${result}\n${patchNote}`;
+    if (result && typeof result === "object" && !Array.isArray(result)) return { ...result, start_gcode_patch: patchNote };
+    return { result, start_gcode_patch: patchNote };
   }
 
   setupErrorHandling() {
@@ -2037,6 +2060,7 @@ class ThreeDPrinterMCPServer {
                   }
                 : undefined
             );
+            const processPatchNote = this.startGcodePatchNote(gcodePath);
 
             if (type.toLowerCase() === 'bambu' && gcodePath.toLowerCase().endsWith(".3mf")) {
               if (!bambuSerial || !bambuToken) {
@@ -2082,6 +2106,7 @@ class ThreeDPrinterMCPServer {
                 layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
                 timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
               });
+              result = this.withStartGcodePatchNote(result, processPatchNote);
               break;
             }
 
@@ -2112,6 +2137,7 @@ class ThreeDPrinterMCPServer {
               status: "Checked print job started",
               print: printResult,
             };
+            result = this.withStartGcodePatchNote(result, processPatchNote);
             break;
             
           // New STL manipulation tool handlers
@@ -2320,6 +2346,7 @@ class ThreeDPrinterMCPServer {
             const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
 
             let threeMFPath = String(args.three_mf_path);
+            let printPatchNote: string | undefined;
 
             // Only the selected plate's exact G-code entry counts as sliced output;
             // a stray .gcode entry elsewhere in the archive is not printable.
@@ -2360,6 +2387,7 @@ class ThreeDPrinterMCPServer {
                   { bedType: printBedType, ...(resolveNozzleType(args?.nozzle_type) ? { nozzleType: resolveNozzleType(args?.nozzle_type) } : {}) }
                 );
                 console.log("Auto-sliced to: " + threeMFPath);
+                printPatchNote = this.startGcodePatchNote(threeMFPath);
               } catch (sliceErr: any) {
                 // Never fall back to uploading the original unsliced project.
                 // Rethrow the original instance (for example a SlicerError) so
@@ -2427,6 +2455,7 @@ class ThreeDPrinterMCPServer {
                     plateIndex: 0, 
                     ...printOptions // Spread the final options
                 });
+                result = this.withStartGcodePatchNote(result, printPatchNote);
                 // Report what the printer did, not merely that a command was published.
             } catch (printError) {
                  console.error(`Error starting 3MF print for ${threeMfFilename}:`, printError);
@@ -2561,6 +2590,9 @@ class ThreeDPrinterMCPServer {
             throw new Error(`Unknown tool: ${name}`);
         }
 
+        if (result instanceof ToolTextItems) {
+          return { content: result.texts.map((text) => ({ type: "text", text })) };
+        }
         return {
           content: [
             {
