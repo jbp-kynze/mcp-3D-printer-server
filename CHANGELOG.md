@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- Insert a per-server start G-code snippet into the resolved Bambu machine
+  preset, for printer-specific hardware such as a nozzle wiper.
+  `BAMBU_START_GCODE_INSERT_FILE` and `BAMBU_START_GCODE_INSERT_BEFORE` (an
+  exact anchor line) turn it on; `BAMBU_START_GCODE_INSERT_SECTION_START`/`_END`
+  and `BAMBU_START_GCODE_INSERT_PRESETS` optionally restrict where and for which
+  presets it applies. Templates still cannot change the start G-code, because
+  machine settings are dropped from process and filament files. Only
+  `machine_start_gcode` changes, never `change_filament_gcode`. A missing
+  snippet, a missing or repeated anchor, an anchor outside the section, a preset
+  that is not allowed, or a partial configuration stops the slice before the
+  slicer runs. The snippet is not inserted twice. `slice_stl`,
+  `slice_with_template`, `print_3mf` auto-slicing, and `process_and_print_stl`
+  report what was applied; the print safety gate is unchanged. Evidence: unit
+  and MCP tests with a fake slicer and stubbed printer transports, and one real
+  OrcaSlicer 2.4.3 slice (X1C 0.4, hardened steel, Bambu ABS, three objects) whose
+  plate G-code carried the 30 snippet lines once, directly before
+  `M221 R; pop softend status`, and matched an unpatched slice otherwise. No
+  print was started; the snippet has not run on hardware through this path.
+
 ### Fixed
 
 - Keep the server alive and answer `get_printer_status` for Bambu printers that

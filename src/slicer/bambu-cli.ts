@@ -16,6 +16,12 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { flattenForCli, detectProfilesRoot, resolveBblMachineProfile } from "./profile-flatten.js";
+import {
+  applyStartGcodePatch,
+  describeStartGcodePatch,
+  type StartGcodePatchConfig,
+  type StartGcodePatchReport,
+} from "./start-gcode-patch.js";
 
 export type BambuCliSlicerType = "bambustudio" | "orcaslicer" | "orcaslicer-bambulab";
 
@@ -60,6 +66,13 @@ export interface BambuSettingsBundle {
   projectTowerPosition?: { wipe_tower_x?: unknown; wipe_tower_y?: unknown };
   /** Identity provenance before the process is merged into a generated file. */
   processSource?: { filePath: string; profile: Record<string, unknown> };
+  /** Set when a per-server start G-code patch was checked into the machine preset. */
+  startGcodePatch?: StartGcodePatchReport;
+}
+
+export interface BambuCliPreparerOptions {
+  /** Per-server machine_start_gcode insertion (start-gcode-patch.ts); off when undefined. */
+  startGcodePatch?: StartGcodePatchConfig;
 }
 
 /**
@@ -96,7 +109,10 @@ export function resolveBambuCliBedType(bedType?: string): string | undefined {
 }
 
 export class BambuCliProfilePreparer {
-  constructor(private readonly tempDir: string) {}
+  constructor(
+    private readonly tempDir: string,
+    private readonly preparerOptions: BambuCliPreparerOptions = {}
+  ) {}
 
   private readJsonFile(filePath: string): any {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -526,6 +542,20 @@ export class BambuCliProfilePreparer {
         this.writeTempJson(outputBase, "machine_orca_resolved", this.sanitizeMachineForOrca(this.readJsonFile(machinePath))),
         this.writeTempJson(outputBase, "process_orca_resolved", this.sanitizeProcessForOrca(this.readJsonFile(processPath), printerPreset)),
       ].join(";");
+    }
+    // Per-server start G-code (for example a nozzle wiper pass) goes into the
+    // fully resolved machine preset, which owns machine_start_gcode; isolation
+    // below then keeps process/filament files from replacing it.
+    const startGcodePatch = this.preparerOptions.startGcodePatch;
+    if (startGcodePatch) {
+      if (!bundle.settingsArg || !printerPreset) {
+        throw new Error("Start G-code patch is configured, but no machine preset was prepared; refusing to slice without it.");
+      }
+      const [machinePath, ...rest] = bundle.settingsArg.split(";");
+      const { machine, report } = applyStartGcodePatch(this.readJsonFile(machinePath), printerPreset, startGcodePatch);
+      console.error(describeStartGcodePatch(report));
+      bundle.settingsArg = [this.writeTempJson(outputBase, "machine_start_gcode_patch", machine), ...rest].join(";");
+      bundle.startGcodePatch = report;
     }
     return this.isolateMachineSettings(bundle);
   }

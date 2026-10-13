@@ -98,6 +98,8 @@ API_KEY=your_api_key              # OctoPrint, Repetier, Prusa, Creality
 # FILAMENT_PROFILE=/path/to/filament.json
 # BAMBU_PROFILES_ROOT=            # Profile tree containing BBL/, if not found from SLICER_PATH
 # BAMBU_TEMPLATE_DIR=~/Sync/bambu/templates
+# BAMBU_START_GCODE_INSERT_FILE=  # Per-printer start G-code snippet (see SLICING.md)
+# BAMBU_START_GCODE_INSERT_BEFORE="M221 R; pop softend status"
 
 # --- MCP transport ---
 # MCP_TRANSPORT=stdio             # stdio (default) or streamable-http
@@ -139,6 +141,10 @@ API_KEY=your_api_key              # OctoPrint, Repetier, Prusa, Creality
 | `SLICER_TIMEOUT_MS` | `600000` | No | Slicer process deadline in milliseconds |
 | `BAMBU_PROFILES_ROOT` | found from `SLICER_PATH` | No | Profile tree containing `BBL/` for the active Bambu-compatible slicer. Set it for AppImages or non-standard installs. It is never replaced by another installation's tree |
 | `BAMBU_SLICER_PROFILE_DIRS` | the slicers' user `system/BBL` directories | No | Directories (separated with your OS path delimiter) searched for custom process and filament parents, never for machine presets. Set it empty to disable the search |
+| `BAMBU_START_GCODE_INSERT_FILE` | | No | Snippet inserted into the resolved machine preset's `machine_start_gcode` for every Bambu-compatible slice on this server, for printer-specific hardware such as a nozzle wiper. Never touches `change_filament_gcode`. Fails closed. See [per-printer start G-code](./SLICING.md#per-printer-start-g-code) |
+| `BAMBU_START_GCODE_INSERT_BEFORE` | | With `BAMBU_START_GCODE_INSERT_FILE` | Exact start G-code line the snippet goes in front of; it must appear exactly once |
+| `BAMBU_START_GCODE_INSERT_SECTION_START`, `BAMBU_START_GCODE_INSERT_SECTION_END` | | No | Both or neither: section markers the anchor must lie between |
+| `BAMBU_START_GCODE_INSERT_PRESETS` | any preset | No | `;`-separated machine presets the snippet is allowed for; slicing any other preset on this server fails |
 | `BAMBU_TEMPLATE_DIR` | `~/Sync/bambu/templates` | No | Local template registry for `slice_with_template`, `list_templates`, `save_template`, and `get_slice_settings` |
 | `BAMBU_TEMPLATE_3MF_PATH` | | No | Default template 3MF whose slicer settings are reused as the process profile |
 | `FULU_ORCA_PATH` | | No | FULU OrcaSlicer-bambulab executable when `SLICER_PATH` is unset. Aliases: `ORCASLICER_BAMBULAB_PATH`, `ORCA_SLICER_BAMBULAB_PATH` |

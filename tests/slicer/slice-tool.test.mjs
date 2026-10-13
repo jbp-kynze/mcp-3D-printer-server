@@ -436,6 +436,51 @@ test("machine settings inside a template or process profile never replace the se
   assert.deepEqual(JSON.parse(await fs.readFile(standaloneProcess, "utf8")).machine_start_gcode, "; FOREIGN STANDALONE", "the caller's file is not modified");
 });
 
+test("a per-server start G-code patch reaches the CLI machine preset and is reported by both slice tools", async (t) => {
+  const install = await createFakeInstall(t);
+  const snippet = path.join(install.root, "wipe.gcode");
+  await fs.writeFile(snippet, ";===== test wipe start\nG1 Z10 F1200\n;===== test wipe end\n");
+  const { call } = await startServer(t, install, {
+    BAMBU_START_GCODE_INSERT_FILE: snippet, BAMBU_START_GCODE_INSERT_BEFORE: ";===== machine: P1S =====",
+    BAMBU_START_GCODE_INSERT_PRESETS: P1S,
+  });
+  // A template exported for another printer must not replace the patched start G-code either.
+  await fs.mkdir(path.join(install.root, "templates"), { recursive: true });
+  await fs.writeFile(path.join(install.root, "templates", "foreign.json"),
+    JSON.stringify({ name: "Foreign", from: "User", wall_loops: "4", machine_start_gcode: "; FOREIGN START" }));
+  for (const [tool, args] of [["slice_stl", {}], ["slice_with_template", { template_name: "foreign" }]]) {
+    await install.resetCapture();
+    const result = await call(tool, { stl_path: SAMPLE_STL, bambu_model: "p1s", ...args });
+    assert.equal(result.isError, undefined, text(result));
+    const [outputPath, note] = text(result).split("\n");
+    await assertSliced(outputPath);
+    assert.match(note, /^Start G-code patch applied to "Bambu Lab P1S 0\.4 nozzle": inserted 3 line\(s\) at machine_start_gcode line 1/);
+    const cliArgs = await install.args();
+    const machine = JSON.parse(await fs.readFile(cliArgs[cliArgs.indexOf("--load-settings") + 1].split(";")[0], "utf8"));
+    assert.equal(machine.machine_start_gcode, ";===== test wipe start\nG1 Z10 F1200\n;===== test wipe end\n;===== machine: P1S =====", tool);
+    assert.equal(machine.change_filament_gcode, "M620 S[next_extruder]A ; P1S AMS", "change_filament_gcode is never patched");
+  }
+  // A different preset on this server fails closed before the slicer runs.
+  await install.resetCapture();
+  const other = await call("slice_stl", { stl_path: SAMPLE_STL, bambu_model: "x1c" });
+  assert.equal(other.isError, true);
+  assert.match(text(other), /Start G-code patch|not found/);
+  await assertNotExecuted(install);
+});
+
+test("without BAMBU_START_GCODE_INSERT_FILE the slice result and start G-code stay stock", async (t) => {
+  const install = await createFakeInstall(t);
+  const { call } = await startServer(t, install, {
+    BAMBU_START_GCODE_INSERT_FILE: "", BAMBU_START_GCODE_INSERT_BEFORE: "", BAMBU_START_GCODE_INSERT_PRESETS: "",
+  });
+  const result = await call("slice_stl", { stl_path: SAMPLE_STL, bambu_model: "p1s" });
+  assert.equal(result.isError, undefined, text(result));
+  assert.equal(text(result).includes("\n"), false, "the result is only the output path");
+  const cliArgs = await install.args();
+  const machine = JSON.parse(await fs.readFile(cliArgs[cliArgs.indexOf("--load-settings") + 1].split(";")[0], "utf8"));
+  assert.equal(machine.machine_start_gcode, ";===== machine: P1S =====");
+});
+
 test("PrusaSlicer, Slic3r, and Cura keep their G-code paths and report failures", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "generic-slicer-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

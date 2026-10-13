@@ -17,6 +17,12 @@ import {
 } from '../slicer/bambu-cli.js';
 import { runSlicerProcess } from '../slicer/run-slicer.js';
 import { SlicerError, asPreparationError } from '../slicer/slicer-error.js';
+import {
+  START_GCODE_PATCH_ENV,
+  startGcodePatchConfigFromEnv,
+  type StartGcodePatchConfig,
+  type StartGcodePatchReport,
+} from '../slicer/start-gcode-patch.js';
 
 export type { BambuSliceOptions } from '../slicer/bambu-cli.js';
 import { execFile } from 'child_process';
@@ -65,6 +71,8 @@ export type TransformationParams = {
 export class STLManipulator extends EventEmitter {
   private tempDir: string;
   private activeOperations: Map<string, boolean> = new Map();
+  /** Start G-code patch applied to each sliced output, keyed by output path. */
+  private startGcodePatchReports: Map<string, StartGcodePatchReport> = new Map();
 
   constructor(tempDir: string = path.join(process.cwd(), 'temp')) {
     super();
@@ -979,6 +987,17 @@ export class STLManipulator extends EventEmitter {
   }
 
   /**
+   * The start G-code patch applied when slicing outputPath, if any. Each report
+   * is returned once so the map does not grow with every slice.
+   */
+  takeStartGcodePatchReport(outputPath: string): StartGcodePatchReport | undefined {
+    const key = path.resolve(outputPath);
+    const report = this.startGcodePatchReports.get(key);
+    this.startGcodePatchReports.delete(key);
+    return report;
+  }
+
+  /**
    * Slice an STL or 3MF file using the specified slicer
    * @param stlFilePath Path to the input STL or 3MF file
    * @param slicerType Type of slicer (prusaslicer, cura, slic3r, orcaslicer, orcaslicer-bambulab, bambustudio)
@@ -1007,6 +1026,7 @@ export class STLManipulator extends EventEmitter {
 
     let orcaOutputDir: string | undefined;
     let bambuOutputDir: string | undefined;
+    let startGcodePatchReport: StartGcodePatchReport | undefined;
 
     try {
       try {
@@ -1016,6 +1036,22 @@ export class STLManipulator extends EventEmitter {
       }
       if (!fs.existsSync(stlFilePath)) {
         throw new SlicerError('preparation', `Input model not found: ${stlFilePath}`, { slicerType, slicerPath });
+      }
+
+      // Per-server start G-code insertion is read at slice time. When it is
+      // configured, every slice on this server must carry it: refuse paths
+      // that cannot apply it instead of returning stock start G-code.
+      let startGcodePatch: StartGcodePatchConfig | undefined;
+      try {
+        startGcodePatch = startGcodePatchConfigFromEnv();
+        if (startGcodePatch && !bambuCli) {
+          throw new Error(
+            `${START_GCODE_PATCH_ENV.file} is set, so this server only slices through a Bambu machine preset. ` +
+            'Pass bambu_model (or set BAMBU_MODEL) with a Bambu-compatible slicer_type; refusing to slice without the start G-code patch.'
+          );
+        }
+      } catch (error) {
+        throw asPreparationError(error, { slicerType, slicerPath });
       }
 
       const orcaProfiles = this.parseOrcaProfileArgs(slicerProfile, filamentProfile);
@@ -1061,7 +1097,7 @@ export class STLManipulator extends EventEmitter {
             options.loadFilaments = legacyFilaments;
           }
           const profilesRoot = detectProfilesRoot(slicerPath, cliType);
-          const preparer = new BambuCliProfilePreparer(path.join(this.tempDir, 'slicer-profiles'));
+          const preparer = new BambuCliProfilePreparer(path.join(this.tempDir, 'slicer-profiles'), { startGcodePatch });
           const bundle = await preparer.prepare(
             stlFilePath,
             outputBase,
@@ -1071,6 +1107,7 @@ export class STLManipulator extends EventEmitter {
             orcaProfiles.settingsProfiles[0],
             options
           );
+          startGcodePatchReport = bundle.startGcodePatch;
           bambuOutputDir = fs.mkdtempSync(path.join(this.tempDir, `${operationId}-bambu-output-`));
           args = [...buildBambuCliArgs(bundle, bambuOutputDir, exportName, options), stlFilePath];
           bambuExport = {
@@ -1171,6 +1208,7 @@ export class STLManipulator extends EventEmitter {
         throw new SlicerError('output', error instanceof Error ? error.message : String(error), { slicerType, slicerPath });
       }
 
+      if (startGcodePatchReport) this.startGcodePatchReports.set(path.resolve(outputFilePath), startGcodePatchReport);
       if (progressCallback) progressCallback(100, "Slicing completed successfully");
 
       this.emit('operationComplete', {

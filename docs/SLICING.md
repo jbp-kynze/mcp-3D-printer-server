@@ -73,7 +73,7 @@ Bambu Studio, FULU OrcaSlicer-bambulab, and OrcaSlicer with `bambu_model` produc
 
 1. **Machine preset.** It takes the model from `bambu_model` (or `BAMBU_MODEL`, asked for through elicitation when missing) and the nozzle from `nozzle_diameter` (or `NOZZLE_DIAMETER`, default 0.4), and finds the exact `<model> <diameter> nozzle` machine preset, such as `Bambu Lab P1S 0.4 nozzle`, in the selected installation's `BBL` profile tree. The tree is found from `SLICER_PATH`, or set with `BAMBU_PROFILES_ROOT` for AppImages and non-standard installs. A preset is never borrowed from another installation.
 2. **Resolution.** `inherits` and `include` chains are flattened, and the model's `cli_config.json` entry is validated. Custom process and filament parents are looked up in `BAMBU_SLICER_PROFILE_DIRS` (default: the slicers' user `system/BBL` directories), never machine presets.
-3. **Process and filaments.** `slicer_profile`, a template, or `BAMBU_TEMPLATE_3MF_PATH` supplies process settings. Machine settings carried by process, filament, or template files are dropped, so they cannot replace the selected preset's start G-code.
+3. **Process and filaments.** `slicer_profile`, a template, or `BAMBU_TEMPLATE_3MF_PATH` supplies process settings. Machine settings carried by process, filament, or template files are dropped, so they cannot replace the selected preset's start G-code. To add printer-specific start G-code, use the [per-printer start G-code](#per-printer-start-g-code) hook instead.
 4. **Checks.** Missing presets, wrong nozzle sizes, missing parents or includes, cycles, malformed profiles, missing process or filament files, and machine/process lists in `slicer_profile` all stop before the slicer runs.
 5. **Output.** The result must contain a nonempty `Metadata/plate_<n>.gcode`. A checksum-only archive, missing output, or a stale file from an earlier run is an error. Slicer failures report the exit code or signal, whether it timed out, the tails of stdout and stderr, and slicing-specific suggestions.
 
@@ -82,6 +82,39 @@ Slicing accepts `p1s`, `p1p`, `p2s`, `x1c`, `x1e`, `a1`, `a1mini`, `h2d`, `h2s`,
 `slice_stl` and `slice_with_template` also take `bed_type`, `nozzle_type`, `load_filaments`, `load_filament_ids`, `filament_colours`, template selection, and the Bambu CLI placement and transform options (`orient`, `arrange`, `ensure_on_bed`, `repetitions`, `clone_objects`, `skip_objects`, `slice_plate`, `scale`, `rotate`, `rotate_x`, `rotate_y`, `uptodate`, `min_save`, `skip_modified_gcodes`, `enable_timelapse`, `allow_mix_temp`). See the [slicing tools reference](../README.md#slice_stl).
 
 **Evidence.** Bambu Studio 02.01.01.52 sliced a P1S 0.4 nozzle job through this path, including a 9.7 MB refitted phone-case STL in Bambu TPU 95A HF (230 °C nozzle, 35 °C plate, about 1 h 38 min and 21 g); see the [Blender guide's worked example](./BLENDER.md#worked-example-refit-a-phone-case-for-a-new-phone). Before this change, Bambu Studio rejected the raw inherited P1S preset with exit 239 ("process not compatible with printer"). Other slicer versions and models have not been tested here.
+
+### Per-printer start G-code
+
+A template cannot change the start G-code, because the machine preset owns it (step 3). When one server drives one physical printer with extra hardware, such as a nozzle wiper, the server's environment can insert a G-code snippet into the resolved machine preset's `machine_start_gcode` before the slicer runs:
+
+| Variable | Meaning |
+|---|---|
+| `BAMBU_START_GCODE_INSERT_FILE` | Snippet file. Setting it turns the hook on. |
+| `BAMBU_START_GCODE_INSERT_BEFORE` | Required with the file: the exact start G-code line the snippet goes in front of. It must appear exactly once, as a whole line. |
+| `BAMBU_START_GCODE_INSERT_SECTION_START` / `_SECTION_END` | Optional pair: the anchor must lie between the nearest preceding line that starts with the first marker and the next line that starts with the second. |
+| `BAMBU_START_GCODE_INSERT_PRESETS` | Optional, `;`-separated: the only machine presets this server may slice for, such as `Bambu Lab X1 Carbon 0.4 nozzle`. |
+
+The rules:
+
+- Only `machine_start_gcode` changes. `change_filament_gcode`, the end G-code, and every other key stay as the preset defines them, and the bundled preset file on disk is never edited (the server writes a patched copy for the CLI).
+- It fails closed. A missing or empty snippet, a missing or repeated anchor, an anchor outside the section, a preset outside `BAMBU_START_GCODE_INSERT_PRESETS`, or a partial configuration stops the slice before the slicer runs. With the hook on, the server also refuses slices that cannot use a Bambu machine preset (generic OrcaSlicer without `bambu_model`).
+- It is idempotent. If the whole snippet is already in the start G-code (found by its first non-blank line), nothing is inserted again. Two copies, or a first line that matches without the rest of the snippet, stop the slice, so start the snippet with a unique comment line.
+- It is reported. The server log and the `slice_stl` / `slice_with_template` result name the preset, the line, the anchor, the file and its SHA-256 prefix. `print_3mf` auto-slicing and `process_and_print_stl` go through the same preparation and add a `start_gcode_patch` field to their result.
+- Print safety checks are unchanged. A `.3mf` that is already sliced is printed as it is, so slice it through this server (or include the snippet yourself) if the printer needs it.
+
+Example for an X1C with a nozzle wiper, inserting the wipe just before the stock "pop soft endstop" line of its wipe section:
+
+```bash
+BAMBU_START_GCODE_INSERT_FILE=/path/to/wipe.gcode
+BAMBU_START_GCODE_INSERT_BEFORE="M221 R; pop softend status"
+BAMBU_START_GCODE_INSERT_SECTION_START=";===== wipe nozzle ====="
+BAMBU_START_GCODE_INSERT_SECTION_END=";===== wipe nozzle end"
+BAMBU_START_GCODE_INSERT_PRESETS="Bambu Lab X1 Carbon 0.4 nozzle"
+```
+
+Set these only on the server for the printer that has the hardware. Keep G-code with absolute Z moves out of filament-change G-code; the hook never writes there.
+
+**Evidence.** OrcaSlicer 2.4.3 sliced a three-object X1C 0.4 job in Bambu ABS with this example and the stock profile tree: the 30 snippet lines appeared once, directly before `M221 R; pop softend status`, and the plate G-code otherwise matched an unpatched slice apart from time estimates and object IDs. The wipe G-code itself has not been run on a printer through this path.
 
 ## Slicing templates
 
